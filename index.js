@@ -96,6 +96,36 @@ async function fetchAndStoreLead(leadId) {
 // ── GET /leads — CRM calls this to pull stored leads ─────────────────────
 app.get('/leads', (req, res) => res.json(loadLeads()));
 
+// ── One-time setup: subscribe page to leadgen webhook events ─────────────
+app.get('/setup', async (req, res) => {
+  try {
+    const accountsRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?access_token=${META_TOKEN}`);
+    const accountsData = await accountsRes.json();
+    if (accountsData.error) return res.send(`Error getting pages: ${accountsData.error.message}`);
+
+    const pages = accountsData.data || [];
+    if (pages.length === 0) return res.send('No Facebook Pages found for this token.');
+
+    const results = [];
+    for (const page of pages) {
+      const subRes = await fetch(
+        `https://graph.facebook.com/v19.0/${page.id}/subscribed_apps?access_token=${page.access_token || META_TOKEN}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subscribed_fields: 'leadgen' })
+        }
+      );
+      const subData = await subRes.json();
+      results.push({ page: page.name, result: subData });
+    }
+
+    res.send(`<pre>Setup complete:\n${JSON.stringify(results, null, 2)}</pre>`);
+  } catch (err) {
+    res.send(`Setup failed: ${err.message}`);
+  }
+});
+
 // ── Health check ─────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('DetailX webhook server running'));
 
