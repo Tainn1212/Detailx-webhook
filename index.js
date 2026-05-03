@@ -1,34 +1,27 @@
 const express = require('express');
-const Database = require('better-sqlite3');
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
 
-const db = new Database('leads.db');
+const DB_FILE = path.join(__dirname, 'leads.json');
 
-// Create leads table if it doesn't exist
-db.exec(`
-  CREATE TABLE IF NOT EXISTS leads (
-    id          TEXT PRIMARY KEY,
-    meta_id     TEXT UNIQUE,
-    name        TEXT,
-    phone       TEXT,
-    email       TEXT,
-    vehicle     TEXT,
-    job_type    TEXT,
-    urgency     TEXT,
-    location    TEXT,
-    lead_source TEXT,
-    created_at  TEXT,
-    synced_at   TEXT
-  )
-`);
+function loadLeads() {
+  try {
+    if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch {}
+  return [];
+}
+
+function saveLeads(leads) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(leads, null, 2));
+}
 
 const META_TOKEN = process.env.META_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// ── Webhook verification (Meta calls this when you first connect) ──────────
+// ── Webhook verification ───────────────────────────────────────────────────
 app.get('/webhook', (req, res) => {
   const mode      = req.query['hub.mode'];
   const token     = req.query['hub.verify_token'];
@@ -44,7 +37,7 @@ app.get('/webhook', (req, res) => {
 
 // ── Receive lead notifications from Meta ───────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // acknowledge immediately
+  res.sendStatus(200);
 
   const body = req.body;
   if (body.object !== 'page') return;
@@ -52,34 +45,22 @@ app.post('/webhook', async (req, res) => {
   for (const entry of (body.entry || [])) {
     for (const change of (entry.changes || [])) {
       if (change.field !== 'leadgen') continue;
-
       const leadId = change.value?.leadgen_id;
       if (!leadId) continue;
-
-      try {
-        await fetchAndStoreLead(leadId);
-      } catch (err) {
-        console.error('Failed to fetch lead', leadId, err.message);
-      }
+      try { await fetchAndStoreLead(leadId); } catch (err) { console.error('Failed to fetch lead', leadId, err.message); }
     }
   }
 });
 
-// ── Fetch full lead data from Meta and store it ────────────────────────────
+// ── Fetch full lead from Meta and store ────────────────────────────────────
 async function fetchAndStoreLead(leadId) {
-  const url = `https://graph.facebook.com/v19.0/${leadId}?fields=id,created_time,field_data&access_token=${META_TOKEN}`;
-  const res = await fetch(url);
+  const res = await fetch(`https://graph.facebook.com/v19.0/${leadId}?fields=id,created_time,field_data&access_token=${META_TOKEN}`);
   const data = await res.json();
 
-  if (data.error) {
-    console.error('Meta API error:', data.error.message);
-    return;
-  }
+  if (data.error) { console.error('Meta API error:', data.error.message); return; }
 
   const fields = {};
-  for (const f of (data.field_data || [])) {
-    fields[f.name.toLowerCase()] = (f.values || [])[0] || '';
-  }
+  for (const f of (data.field_data || [])) fields[f.name.toLowerCase()] = (f.values || [])[0] || '';
 
   const name     = fields['full_name'] || fields['name'] || 'Unknown';
   const phone    = (fields['phone_number'] || fields['phone'] || '').replace(/^p:/i, '').trim();
@@ -89,38 +70,33 @@ async function fetchAndStoreLead(leadId) {
   const rawUrg   = fields["how_soon_are_you_wanting_it_done?"] || '';
   const rawLoc   = fields["where_in_auckland_are_you_based?"] || '';
 
-  const jobType  = mapJobType(rawJob);
-  const urgency  = mapUrgency(rawUrg);
-  const location = mapLocation(rawLoc);
-  const source   = 'Meta Ad';
-  const createdAt = data.created_time ? new Date(data.created_time).toISOString() : new Date().toISOString();
+  const lead = {
+    id: data.id,
+    meta_id: data.id,
+    name,
+    phone,
+    email,
+    vehicle,
+    job_type: mapJobType(rawJob),
+    urgency: mapUrgency(rawUrg),
+    location: mapLocation(rawLoc),
+    lead_source: 'Meta Ad',
+    created_at: data.created_time ? new Date(data.created_time).toISOString() : new Date().toISOString(),
+    synced_at: new Date().toISOString(),
+  };
 
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO leads
-      (id, meta_id, name, phone, email, vehicle, job_type, urgency, location, lead_source, created_at, synced_at)
-    VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  stmt.run(
-    data.id,
-    data.id,
-    name, phone, email, vehicle,
-    jobType, urgency, location, source,
-    createdAt,
-    new Date().toISOString()
-  );
-
-  console.log(`Stored lead: ${name} (${phone})`);
+  const leads = loadLeads();
+  if (!leads.find(l => l.meta_id === lead.meta_id)) {
+    leads.unshift(lead);
+    saveLeads(leads);
+    console.log(`Stored lead: ${name} (${phone})`);
+  }
 }
 
-// ── GET /leads — CRM calls this to pull all stored leads ──────────────────
-app.get('/leads', (req, res) => {
-  const rows = db.prepare('SELECT * FROM leads ORDER BY created_at DESC').all();
-  res.json(rows);
-});
+// ── GET /leads — CRM calls this to pull stored leads ─────────────────────
+app.get('/leads', (req, res) => res.json(loadLeads()));
 
-// ── Health check ──────────────────────────────────────────────────────────
+// ── Health check ─────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send('DetailX webhook server running'));
 
 // ── Helpers ───────────────────────────────────────────────────────────────
