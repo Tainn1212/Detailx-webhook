@@ -98,44 +98,24 @@ app.get('/leads', (req, res) => res.json(loadLeads()));
 
 // ── One-time setup: subscribe page to leadgen webhook events ─────────────
 app.get('/setup', async (req, res) => {
-  const token = req.query.token || META_TOKEN;
-  if (!token) return res.send('No token provided. Add ?token=YOUR_TOKEN to the URL.');
+  const pageToken = req.query.pagetoken;
+  if (!pageToken) return res.send('Add ?pagetoken=YOUR_PAGE_TOKEN to the URL.');
+
+  const pageId = '1048706278325175';
 
   try {
-    // Try to get pages via user token
-    const accountsRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?fields=id,name,access_token&access_token=${token}`);
-    const accountsData = await accountsRes.json();
+    const params = new URLSearchParams({ subscribed_fields: 'leadgen', access_token: pageToken });
+    const subRes = await fetch(
+      `https://graph.facebook.com/v19.0/${pageId}/subscribed_apps`,
+      { method: 'POST', body: params }
+    );
+    const subData = await subRes.json();
 
-    let pages = accountsData.data || [];
-
-    // If no pages found, try subscribing directly with the DetailX page ID
-    if (pages.length === 0) {
-      const pageId = '1048706278325175';
-      const pageRes = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=id,name,access_token&access_token=${token}`);
-      const pageData = await pageRes.json();
-      if (pageData.id) {
-        pages = [{ id: pageData.id, name: pageData.name || 'DetailX', access_token: pageData.access_token || token }];
-      }
+    if (subData.success) {
+      res.send('SUCCESS - DetailX page is now subscribed to leadgen events. Webhook is fully active.');
+    } else {
+      res.send(`<pre>Response:\n${JSON.stringify(subData, null, 2)}</pre>`);
     }
-
-    if (pages.length === 0) return res.send(`No pages found. Token error: ${JSON.stringify(accountsData.error || 'unknown')}`);
-
-    const results = [];
-    for (const page of pages) {
-      const pageToken = page.access_token || token;
-      const subRes = await fetch(
-        `https://graph.facebook.com/v19.0/${page.id}/subscribed_apps`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subscribed_fields: 'leadgen', access_token: pageToken })
-        }
-      );
-      const subData = await subRes.json();
-      results.push({ page: page.name, id: page.id, result: subData });
-    }
-
-    res.send(`<pre>Setup complete:\n${JSON.stringify(results, null, 2)}</pre>`);
   } catch (err) {
     res.send(`Setup failed: ${err.message}`);
   }
